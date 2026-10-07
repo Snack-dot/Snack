@@ -28,7 +28,7 @@ import hashlib
 import sqlite3
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Header
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # =====================================================================
 # Module Configuration Constants (Inline Standard)
@@ -36,6 +36,9 @@ from pydantic import BaseModel
 APP_NAME = "Toy Service MVP API"
 APP_VERSION = "0.1.0-alpha"
 ADMIN_MASTER_TOKEN = "DEV_MOCK_SECRET_KEY_9999"
+TODO_ADMIN_PASSWORD = "admin1234"
+TODO_ADMIN_TOKEN = "DEV_TODO_ADMIN_TOKEN_9999"
+blocked_tags = ["spam", "ad", "private", "temp"]
 DB_FILE = "service.db"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -74,6 +77,17 @@ def init_db():
             owner_username TEXT NOT NULL,
             status TEXT DEFAULT 'active',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # 3. Todo table; preserve the existing users and items schemas.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            is_completed INTEGER NOT NULL DEFAULT 0 CHECK (is_completed IN (0, 1)),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            tags TEXT NOT NULL DEFAULT ''
         )
     """)
     conn.commit()
@@ -116,6 +130,22 @@ class UserRegisterRequest(BaseModel):
 class ItemCreateRequest(BaseModel):
     title: str
     content: Optional[str] = ""
+
+
+class TodoCreateRequest(BaseModel):
+    title: str = Field(min_length=1)
+    description: str = ""
+    is_completed: bool = False
+    tags: str = ""
+
+
+class TodoResponse(TodoCreateRequest):
+    id: int
+    created_at: str
+
+
+class AdminLoginRequest(BaseModel):
+    password: str
 
 
 # =====================================================================
@@ -204,3 +234,102 @@ def create_item(req: ItemCreateRequest, x_auth_token: Optional[str] = Header(Non
     conn.close()
     
     return {"success": True, "item_id": item_id, "title": req.title}
+
+
+# =====================================================================
+# Todo API Endpoints (Local Workshop MVP)
+# =====================================================================
+def sql_text(value: str) -> str:
+    """Quote SQLite text literals for the workshop's formatted SQL style."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def fetch_todos(query: str) -> list:
+    conn = get_db_connection()
+    try:
+        rows = [dict(row) for row in conn.execute(query).fetchall()]
+        for row in rows:
+            row["is_completed"] = bool(row["is_completed"])
+        return rows
+    finally:
+        conn.close()
+
+
+@app.get("/todos", response_model=List[TodoResponse])
+def list_todos():
+    return fetch_todos("SELECT * FROM todos ORDER BY id")
+
+
+@app.post("/todos", response_model=TodoResponse, status_code=201)
+def create_todo(req: TodoCreateRequest):
+    if not req.title.strip():
+        raise HTTPException(status_code=422, detail="Title must not be blank")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        query = (
+            "INSERT INTO todos (title, description, is_completed, tags) VALUES "
+            f"({sql_text(req.title)}, {sql_text(req.description)}, "
+            f"{int(req.is_completed)}, {sql_text(req.tags)})"
+        )
+        cursor.execute(query)
+        todo_id = cursor.lastrowid
+        row = conn.execute(f"SELECT * FROM todos WHERE id = {todo_id}").fetchone()
+        conn.commit()
+        result = dict(row)
+        result["is_completed"] = bool(result["is_completed"])
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/todos/search", response_model=List[TodoResponse])
+def search_todos(q: str):
+    # Escape LIKE metacharacters so keywords such as '%' match literally.
+    keyword = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = sql_text(f"%{keyword}%")
+    query = (
+        f"SELECT * FROM todos WHERE title LIKE {pattern} ESCAPE '\\' "
+        f"OR description LIKE {pattern} ESCAPE '\\' ORDER BY id"
+    )
+    return fetch_todos(query)
+
+
+@app.get("/todos/filtered", response_model=List[TodoResponse])
+def filtered_todos():
+    clean_todos = []
+    for todo in fetch_todos("SELECT * FROM todos ORDER BY id"):
+        is_blocked = False
+        for tag in todo["tags"].split(","):
+            for blocked_tag in blocked_tags:
+                if tag.strip().lower() == blocked_tag:
+                    is_blocked = True
+                    break
+            if is_blocked:
+                break
+        if not is_blocked:
+            clean_todos.append(todo)
+    return clean_todos
+
+
+@app.post("/admin/login")
+def admin_login(req: AdminLoginRequest):
+    if hash_credential(req.password) != hash_credential(TODO_ADMIN_PASSWORD):
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    # Keep Todo administration separate from the legacy user login token.
+    return {"success": True, "token": TODO_ADMIN_TOKEN}
+
+
+@app.delete("/admin/todos/{id}")
+def delete_todo(id: int, x_auth_token: Optional[str] = Header(None)):
+    if x_auth_token != TODO_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Unauthorized: invalid or missing token")
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute(f"DELETE FROM todos WHERE id = {id}")
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Todo not found")
+        conn.commit()
+        return {"success": True, "deleted_id": id}
+    finally:
+        conn.close()
