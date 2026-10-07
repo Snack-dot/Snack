@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+from contextlib import closing
 import concurrent.futures
 import json
 import os
@@ -124,13 +125,11 @@ def run_standalone_comparison(total_requests: int = 100, concurrency: int = 20):
     def naive_worker(idx: int):
         t0 = time.perf_counter()
         try:
-            c = sqlite3.connect(test_db, timeout=0.08)
-            cur = c.cursor()
-            cur.execute("BEGIN EXCLUSIVE")
-            time.sleep(0.002)  # Simulate small transaction duration (2ms)
-            cur.execute("INSERT INTO todos (title, description) VALUES (?, ?)", (f"Task {idx}", "Naive"))
-            c.commit()
-            c.close()
+            with closing(sqlite3.connect(test_db, timeout=0.08)) as c, c:
+                cur = c.cursor()
+                cur.execute("BEGIN EXCLUSIVE")
+                time.sleep(0.002)  # Artificial delay in the baseline only.
+                cur.execute("INSERT INTO todos (title, description) VALUES (?, ?)", (f"Task {idx}", "Naive"))
             elapsed = (time.perf_counter() - t0) * 1000
             return True, elapsed, None
         except sqlite3.OperationalError as e:
@@ -166,12 +165,9 @@ def run_standalone_comparison(total_requests: int = 100, concurrency: int = 20):
     def wal_worker(idx: int):
         t0 = time.perf_counter()
         try:
-            c = sqlite3.connect(test_db, timeout=5.0)
-            c.execute("PRAGMA busy_timeout=5000")
-            cur = c.cursor()
-            cur.execute("INSERT INTO todos (title, description) VALUES (?, ?)", (f"Task {idx}", "Enterprise WAL"))
-            c.commit()
-            c.close()
+            with closing(sqlite3.connect(test_db, timeout=5.0)) as c, c:
+                c.execute("PRAGMA busy_timeout=5000")
+                c.execute("INSERT INTO todos (title, description) VALUES (?, ?)", (f"Task {idx}", "Enterprise WAL"))
             elapsed = (time.perf_counter() - t0) * 1000
             return True, elapsed, None
         except sqlite3.OperationalError as e:
@@ -206,9 +202,9 @@ def run_standalone_comparison(total_requests: int = 100, concurrency: int = 20):
     markdown_table = f"""
 | 지표 (Metrics) | ❌ Naive 초안 (세션 1) | ✅ 하네스 적용 후 (세션 2) | 개선 효과 |
 |:---|:---:|:---:|:---:|
-| **동시 쓰기 에러율** | **{naive_error_rate:.1f}%** (500 Lock Error) | **{wal_error_rate:.2f}%** (무장애 완주) | **SLA 99.99% 달성** |
-| **초당 처리량 (Throughput)** | **{naive_rps:.1f} RPS** (락 병목) | **{wal_rps:.1f} RPS** (논블로킹 쓰기) | **🚀 처리량 {wal_rps / max(naive_rps, 1):.1f}배 향상** |
-| **p99 응답 지연 (Latency)** | **{naive_p99:.2f} ms** | **{wal_p99:.2f} ms** | **서브밀리초 단축** |
+| **동시 쓰기 에러율** | **{naive_error_rate:.1f}%** (DB Lock Error) | **{wal_error_rate:.2f}%** | **이번 시뮬레이션 측정값** |
+| **초당 처리량 (Throughput)** | **{naive_rps:.1f} ops/s** | **{wal_rps:.1f} ops/s** | **{wal_rps / max(naive_rps, 1):.1f}배** |
+| **p99 DB 작업 지연** | **{naive_p99:.2f} ms** | **{wal_p99:.2f} ms** | **HTTP API SLA와 별도** |
 """
     print(markdown_table.strip())
     print("\n👉 위 표를 `templates/README_PORTFOLIO_TEMPLATE.md` 또는 `README.md`에 그대로 반영할 수 있습니다.\n")

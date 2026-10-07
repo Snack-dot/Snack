@@ -102,7 +102,7 @@ def stage2_unit_tests() -> list:
     test_dirs = [d for d in ["tests", "test"] if os.path.isdir(d)]
     if not test_dirs:
         print("  \033[1;33m⚠️ Stage 2 SKIP: tests/ 디렉토리가 없습니다. (단위 테스트 추가 권장)\033[0m")
-        return failures
+        return [{"stage": "Tests", "rule": "Missing Tests", "message": "tests/ 디렉토리가 없습니다."}]
 
     has_test_files = any(
         f.startswith("test_") or f.endswith("_test.py")
@@ -112,17 +112,29 @@ def stage2_unit_tests() -> list:
     )
     if not has_test_files:
         print("  \033[1;33m⚠️ Stage 2 SKIP: tests/ 디렉토리에 테스트 파일이 없습니다. (단위 테스트 추가 권장)\033[0m")
-        return failures
+        return [{"stage": "Tests", "rule": "Missing Tests", "message": "테스트 파일이 없습니다."}]
 
-    res = subprocess.run(["python3", "-m", "pytest", test_dirs[0], "-v", "--tb=short"], capture_output=True, text=True)
+    res = subprocess.run(
+        [sys.executable, "-m", "coverage", "run", "--include=" + os.path.abspath("main.py"),
+         "-m", "pytest", *test_dirs, "-v", "--tb=short"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
     if res.returncode == 0:
         print("  \033[1;32m✅ Stage 2 PASS: 모든 단위/통합 테스트 100% 통과\033[0m")
+        coverage = subprocess.run(
+            [sys.executable, "-m", "coverage", "report", "--fail-under=85"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        print(coverage.stdout)
+        if coverage.returncode != 0:
+            failures.append({"stage": "Tests", "rule": "Coverage Failure",
+                             "message": (coverage.stdout + coverage.stderr)[-2000:]})
     else:
         print("  \033[1;31m❌ Stage 2 FAIL: 테스트 실패 발생\033[0m")
         failures.append({
             "stage": "Tests",
             "rule": "Unit Test Failure",
-            "message": res.stdout[-400:] if len(res.stdout) > 400 else res.stdout
+            "message": (res.stdout + res.stderr)[-2000:]
         })
     return failures
 
@@ -147,7 +159,7 @@ def stage3_performance_benchmark() -> list:
         })
         print(f"  \033[1;31m❌ [SLA Latency] 지연 시간 {elapsed_ms:.2f}ms (SLA 100ms 위반)\033[0m")
     else:
-        print(f"  \033[1;32m✅ [SLA Latency] p99 응답 시간 {elapsed_ms:.2f}ms < 100ms SLA 충족\033[0m")
+        print(f"  \033[1;32m✅ [Lookup Benchmark] 전체 소요 시간 {elapsed_ms:.2f}ms < 100ms (API p99 측정 아님)\033[0m")
 
     # Benchmark 2: SQLite Concurrency & WAL Mode Configuration Guardrail
     has_wal_config = False
@@ -194,7 +206,7 @@ def main():
 
     print_header("Harness Evaluation Summary")
     if passed:
-        print("\033[1;32m🎉 [100% GREEN] 모든 하네스 검증 통과! 프로덕션 배포가 안전합니다.\033[0m")
+        print("\033[1;32m🎉 [100% GREEN] 모든 로컬 하네스 검증 통과!\033[0m")
         print("📄 상세 리포트가 harness_report.json에 기록되었습니다.\n")
         sys.exit(0)
     else:
